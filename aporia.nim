@@ -10,7 +10,7 @@
 # Stdlib imports:
 import glib2, gtk2, gtksourceview, dialogs, os, pango, osproc, strutils
 import gdk2 except `delete` # Don't import delete to avoid "ambiguous identifier" error under Windows
-import pegs, streams, times, parseopt, parseutils, asyncio, sockets, encodings, unicode
+import pegs, streams, times, parseopt, parseutils, asyncio, sockets, encodings
 import tables, algorithm
 
 when defined(macosx):
@@ -125,11 +125,46 @@ proc updateTabUI(t: Tab) =
   else:
     t.label.setText(name)
   setTabTooltip(t)
+ 
+proc checkFileUpdate(pageNum : int): int = 
+  ## Checks if the current tab open has been updated outside of Aporia.
+  ## Returns ``1`` if the file has been updated, ``0`` if not, and ``-1``
+  ## if there has been no change
+
+  var changedInfo: FileInfo = getFileInfo(win.tabs[pageNum].filename)
+  result = -1
+  if win.tabs[pageNum].lastEdit != changedInfo.lastWriteTime:
+
+    var filename: string = extractFilename(win.tabs[pageNum].filename)
+    var askUpdate = win.w.messageDialogNew(0, MessageWarning, BUTTONS_NONE, nil)
+    askUpdate.setTransientFor(win.w)
+    
+    askUpdate.setMarkup("The file \"" & filename & "\" has been been edited outside Aporia.\n\n" & 
+                        "Update to latest revision of the file?")
+    askUpdate.addButtons("_Update", ResponseAccept, "_Ignore", ResponseReject, nil)
+    
+    var updateResponse = askUpdate.run()
+    gtk2.destroy(PWidget(askUpdate))
+    
+    if updateResponse == ResponseAccept:
+      var fileTxt: string = readFile(win.tabs[pageNum].filename)
+      win.tabs[pageNum].buffer.set_text(fileTxt, len(fileTxt).int32)
+      win.tabs[pageNum].saved = true
+      result = 1
+    else:
+      win.tabs[pageNum].saved = false
+      result = 0
+    win.tabs[pageNum].lastEdit = changedInfo.lastWriteTime
 
 proc saveTab(tabNr: int, startpath: string, updateGUI: bool = true) =
   ## If tab's filename is ``""`` and the user clicks "Cancel", the filename will
   ## remain ``""``.
-
+  
+  # Check if the file changed outside the program.
+  if win.tabs[tabNr].filename != "":
+    if checkFileUpdate(tabNr) == 1:
+      return
+  
   # TODO: Refactor this function. It's a disgrace.
   if tabNr < 0: return
   if win.tabs[tabNr].saved: return
@@ -177,7 +212,7 @@ proc saveTab(tabNr: int, startpath: string, updateGUI: bool = true) =
     win.tabs[tabNr].lineEnding.addExtraNL(text)
 
     # Save it to a file
-    var f: File
+    var f: TFile
     if open(f, path, fmWrite):
       f.write(text)
       f.close()
@@ -186,6 +221,7 @@ proc saveTab(tabNr: int, startpath: string, updateGUI: bool = true) =
 
       # Change the tab name and .Tabs.filename etc.
       win.tabs[tabNr].filename = path
+      win.tabs[tabNr].lastEdit = getFileInfo(win.tabs[tabNr].filename).lastWriteTime
 
       if updateGUI:
         win.tabs[tabNr].saved = true
@@ -360,6 +396,7 @@ proc closeTab(tab: int) =
       recentlyOpenedAdd(win.tabs[tab].filename)
     system.delete(win.tabs, tab)
     win.sourceViewTabs.removePage(int32(tab))
+    win.save()
 
 proc window_keyPress(widg: PWidget, event: PEventKey,
                           userData: Pgpointer): gboolean =
@@ -375,7 +412,8 @@ proc window_keyPress(widg: PWidget, event: PEventKey,
       return true
     of KeyW:
       # Ctrl + W
-      closeTab(win.sourceViewTabs.getCurrentPage())
+      if win.sourceViewTabs.getNPages() > 1:
+        closeTab(win.sourceViewTabs.getCurrentPage())
       return true
     else:
       discard
@@ -491,10 +529,11 @@ proc onChanged(buffer: PTextBuffer, sv: PSourceView) =
 proc sourceViewKeyPress(sourceView: PWidget, event: PEventKey,
                           userData: Pgpointer): gboolean =
   result = false
+  let ctrlPressed = (event.state and ControlMask) != 0
   let keyNameCString = keyval_name(event.keyval)
   if keyNameCString == nil: return
   let key = $keyNameCString
-  case unicode.toLower(key)
+  case key.toLower()
   of "up", "down", "page_up", "page_down":
     if win.globalSettings.suggestFeature and win.suggest.shown:
       var selection = win.suggest.treeview.getSelection()
@@ -503,7 +542,7 @@ proc sourceViewKeyPress(sourceView: PWidget, event: PEventKey,
 
       let childrenLen = TreeModel.iter_n_children(nil)
 
-      # Get current tab (for tooltip)
+      # Get current tab(For tooltip)
       var current = win.sourceViewTabs.getCurrentPage()
       var tab     = win.tabs[current]
 
@@ -520,7 +559,7 @@ proc sourceViewKeyPress(sourceView: PWidget, event: PEventKey,
         var selectedPath = TreeModel.getPath(addr(selectedIter))
 
         var moved = false
-        case unicode.toLower(key):
+        case key.toLower():
         of "up":
           moved = prev(selectedPath)
         of "down":
@@ -570,7 +609,7 @@ proc sourceViewKeyPress(sourceView: PWidget, event: PEventKey,
         var index = selectedPath.getIndices()[]
         win.insertSuggestItem(index)
 
-        return unicode.toLower(key) != "period"
+        return key.toLower() != "period"
 
   of "backspace":
     if win.globalSettings.suggestFeature and win.suggest.shown:
@@ -600,7 +639,7 @@ proc sourceViewKeyRelease(sourceView: PWidget, event: PEventKey,
   let keyNameCString = keyval_name(event.keyval)
   if keyNameCString == nil: return
   let key = $keyNameCString
-  case unicode.toLower(key)
+  case key.toLower()
   of "period":
     discard
     # TODO: Disable implicit invocation of suggest until it's more stable.
@@ -617,14 +656,14 @@ proc sourceViewKeyRelease(sourceView: PWidget, event: PEventKey,
       win.doMoveSuggest()
   of "space":
     if win.globalSettings.suggestFeature and not win.suggest.shown and
-        unicode.toLower(key) == "space" and ctrlPressed and
+        key.toLower() == "space" and ctrlPressed and
         win.getCurrentLanguage() == "nim":
       if win.suggest.items.len() != 0: win.suggest.clear()
       doSuggest(win)
       result = false
       #win.filterSuggest()
   else:
-    if unicode.toLower(key) notin ["up", "down", "page_up", "page_down", "home", "end"]:
+    if key.toLower() notin ["up", "down", "page_up", "page_down", "home", "end"]:
 
       if win.globalSettings.suggestFeature and win.suggest.shown:
         win.filterSuggest()
@@ -773,7 +812,7 @@ proc addTab(name, filename: string, setCurrent: bool = true,
   ## Adds a tab. If filename is not "", a file is read and set as the content
   ## of the new tab. If name is "" it will be either "Unknown" or the last part
   ## of the filename.
-  ## If filename doesn't exist IOError is raised.
+  ## If filename doesn't exist EIO is raised.
   ##
   ## Returns the index of the added tab (or existing tab if setCurrent is true).
   ## ``-1`` is returned upon error.
@@ -800,6 +839,7 @@ proc addTab(name, filename: string, setCurrent: bool = true,
 
   # Init tab
   var nTab: Tab; new(nTab)
+  
 
   # Init the sourceview
   var sourceView: PSourceView
@@ -816,7 +856,7 @@ proc addTab(name, filename: string, setCurrent: bool = true,
     # Read the file first so that we can affirm its encoding.
     try:
       var fileTxt: string = readFile(filename)
-      if unicode.toLower(encoding) != "utf-8":
+      if encoding.toLower() != "utf-8":
         fileTxt = convert(fileTxt, "UTF-8", encoding)
       if not g_utf8_validate(fileTxt, fileTxt.len().gssize, nil):
         win.tempStuff.pendingFilename = filename
@@ -833,7 +873,7 @@ proc addTab(name, filename: string, setCurrent: bool = true,
       # Read in the file.
       buffer.set_text(fileTxt, len(fileTxt).int32)
 
-    except IOError: raise
+    except EIO: raise
     finally:
       # Enable the undo/redo manager.
       buffer.end_not_undoable_action()
@@ -842,6 +882,12 @@ proc addTab(name, filename: string, setCurrent: bool = true,
     nam = extractFilename(filename)
 
   var (TabLabel, labelText, closeBtn) = createTabLabel(nam, scrollWindow, filename)
+
+  # Get the last file edit, if applicable.
+  var lastEdit: Time
+  if filename != "":
+    var newInfo: FileInfo = getFileInfo(filename)
+    lastEdit = newInfo.lastWriteTime
 
   # Add a tab
   nTab.buffer = buffer
@@ -853,8 +899,10 @@ proc addTab(name, filename: string, setCurrent: bool = true,
   nTab.highlighted = newNoHighlightAll()
   if not win.globalSettings.showCloseOnAllTabs:
     nTab.closeBtn.hide()
+  if lastEdit != fromSeconds(0):
+    nTab.lastEdit = lastEdit
   win.tabs.add(nTab)
-
+  
   # Set the tooltip
   setTabTooltip(win.tabs[win.tabs.len-1])
 
@@ -888,6 +936,9 @@ proc addTab(name, filename: string, setCurrent: bool = true,
   if setCurrent:
     # Select the newly created tab
     win.sourceViewTabs.setCurrentPage(int32(win.tabs.len())-1)
+  
+  win.save()
+
   return win.tabs.len()-1
 
 # GTK Events Contd.
@@ -961,7 +1012,7 @@ proc openFile(menuItem: PMenuItem, user_data: pointer) =
     for f in items(files):
       try:
         discard addTab("", f, true)
-      except IOError:
+      except EIO:
         error(win.w, "Unable to read from file: " & getCurrentExceptionMsg())
 
 proc saveFile_Activate(menuItem: PMenuItem, user_data: pointer) =
@@ -988,12 +1039,13 @@ proc closeCurrentTab_Activate(menuItem: PMenuItem, user_data: pointer) =
 proc closeAllTabs_Activate(menuItem: PMenuItem, user_data: pointer) =
   while win.tabs.len() > 0:
     closeTab(win.sourceViewTabs.getCurrentPage())
+  discard addTab("", "", true)
 
 proc recentFile_Activate(menuItem: PMenuItem, file: gpointer) =
   let filename = cast[string](file)
   try:
     discard addTab("", filename, true)
-  except IOError:
+  except EIO:
     error(win.w, "Unable to read from file: " & getCurrentExceptionMsg())
 
 proc undo(menuItem: PMenuItem, user_data: pointer) =
@@ -1156,6 +1208,7 @@ proc CommentLines_Activate(menuitem: PMenuItem, user_data: pointer) =
      return
 
   if cb.getSelectionBounds(addr(start), addr(theEnd)):
+    var startOldLineOffset = (addr start).getLineOffset()
 
     (addr start).setLineOffset(0) # Move to start of line.
     if (addr start).getLine() == (addr theEnd).getLine() and
@@ -1300,7 +1353,7 @@ proc compileRun(filename: string, shouldRun: bool) =
   let workDir = filename.splitFile.dir
   if shouldRun:
     let ifSuccess = changeFileExt(filename, os.ExeExt)
-    runAfter = newExec(quoteIfContainsWhite(ifSuccess), workDir, ExecRun)
+    runAfter = newExec(ifSuccess.quoteIfContainsWhite(), workDir, ExecRun)
   win.execProcAsync newExec(cmd, workDir, ExecNim, runAfter = runAfter)
 
 proc CompileCurrent_Activate(menuitem: PMenuItem, user_data: pointer) =
@@ -1458,8 +1511,6 @@ proc onSwitchTab(notebook: PNotebook, page: PNotebookPage, pageNum: guint,
     win.tabs[win.tempStuff.lastTab].closeBtn.hide()
 
   win.tempStuff.lastTab = pageNum
-  updateMainTitle(pageNum)
-  updateStatusBar(win.tabs[pageNum].buffer)
   # Set the lastSavedDir
   if win.tabs.len > pageNum:
     if win.tabs[pageNum].filename.len != 0:
@@ -1477,6 +1528,21 @@ proc onSwitchTab(notebook: PNotebook, page: PNotebookPage, pageNum: guint,
   # Toggle the "Syntax Highlighting" check menu item based in the new tabs
   # syntax highlighting.
   plCheckUpdate(pageNum)
+  
+  updateMainTitle(pageNum)
+  updateStatusBar(win.tabs[pageNum].buffer)
+
+proc onAfterSwitchTab(notebook: PNotebook, page: PNotebookPage, pageNum: guint,
+                      user_data: Pgpointer) = 
+  ## After tab switch; required so the tab is visible when the check for
+  ## modification has run.
+    
+  # Check if the file changed outside the program.
+  if win.tabs[pageNum].filename != "":
+    discard checkFileUpdate(pageNum)
+  
+  updateMainTitle(pageNum)
+  updateStatusBar(win.tabs[pageNum].buffer)
 
 proc onDragDataReceived(widget: PWidget, context: PDragContext,
                         x: gint, y: gint, data: PSelectionData, info: guint,
@@ -1519,7 +1585,7 @@ proc errorList_RowActivated(tv: PTreeView, path: PTreePath,
     return
   var existingTab = addTab("", item.file, true)
   if existingTab == -1:
-    assert(not existsFile(item.file))
+    assert (not existsFile(item.file))
 
     win.statusbar.setTemp(item.file & " does not exist.", UrgError, 5000)
     return
@@ -1706,7 +1772,7 @@ proc goLineClose_clicked(button: PButton, user_data: Pgpointer) =
 # GUI Initialization
 
 proc loadLanguageSections():
-      tables.OrderedTable[string, seq[PSourceLanguage]] =
+      tables.TOrderedTable[string, seq[PSourceLanguage]] =
   result = initOrderedTable[string, seq[PSourceLanguage]]()
   var langMan = languageManagerGetDefault()
   var languages = langMan.getLanguageIDs()
@@ -1717,11 +1783,11 @@ proc loadLanguageSections():
     let section = $lang.getSection()
     if not result.hasKey(section):
       result[section] = @[]
-    result[section].add(lang)
+    result.mget(section).add(lang)
 
   for k, v in mpairs(result):
     v.sort do (x, y: PSourceLanguage) -> int {.closure.}:
-      return cmp(unicode.toLower($x.getName()), unicode.toLower($y.getName()))
+      return cmp(toLower($x.getName()), toLower($y.getName()))
 
   #let cmpB = proc (x, y: tuple[key: string, val: seq[PSourceLanguage]]): int {.closure.} =
   #  return cmp(x.key, y.key)
@@ -1800,14 +1866,21 @@ proc initTopMenu(mainBox: PBox) =
   proc rawPreferences_onActivate(i: PMenuItem, p: pointer) {.cdecl.} =
     try:
       discard addTab("", joinPath(os.getConfigDir(), "Aporia", "config.global.ini"))
-    except IOError:
+    except EIO:
       win.statusBar.setTemp(getCurrentExceptionMsg(), UrgError)
+  
+  proc reloadPreferences_onActivate(i: PMenuItem, p: pointer) {.cdecl.} =
+    var cfgErrors: seq[TError] = @[]
+    let (auto, global) = cfg.load(cfgErrors, lastSession)
+    win.globalSettings = global
 
   when not defined(macosx):
-    # Raw preferences
-    EditMenu.createMenuItem("Raw Preferences", rawPreferences_onActivate)
     # Preferences
     EditMenu.createImageMenuItem(StockPreferences, aporia.settings_Activate)
+    # Raw preferences
+    EditMenu.createMenuItem("Raw Preferences", rawPreferences_onActivate)
+    # Reload preferences
+    EditMenu.createMenuItem("Reload Preferences", reloadPreferences_onActivate)
 
   var EditMenuItem = menuItemNewWithMnemonic("_Edit")
   EditMenuItem.setSubMenu(EditMenu)
@@ -2052,6 +2125,8 @@ proc initsourceViewTabs() =
   win.sourceViewTabs = notebookNew()
   discard win.sourceViewTabs.signalConnect(
           "switch-page", SIGNAL_FUNC(onSwitchTab), nil)
+  discard win.sourceViewTabs.signalConnectAfter(
+          "switch-page", SIGNAL_FUNC(onAfterSwitchTab), nil)
   win.sourceViewTabs.set_scrollable(true)
 
   # Drag and Drop setup
@@ -2350,15 +2425,15 @@ proc initSocket() =
   win.IODispatcher = newDispatcher()
   win.oneInstSock = asyncSocket()
   win.oneInstSock.handleAccept =
-    proc (s: AsyncSocket) =
-      var client: AsyncSocket
+    proc (s: PAsyncSocket) =
+      var client: PAsyncSocket
       new(client)
       s.accept(client)
       # Let the connecting instance know that this instance is alive.
       client.send("ALIVE\c\l")
       #FIXME: threadAnalysis is set to off to work around this anonymous proc not being gc safe
       client.handleRead =
-        proc (c: AsyncSocket) {.closure, gcsafe.} =
+        proc (c: PAsyncSocket) {.closure, gcsafe.} =
           var line = ""
           if c.readLine(line):
             if line == "":
@@ -2380,7 +2455,7 @@ proc initSocket() =
       win.IODispatcher.register(client)
 
   win.IODispatcher.register(win.oneInstSock)
-  win.oneInstSock.bindAddr(Port(win.globalSettings.singleInstancePort.toU16), "localhost")
+  win.oneInstSock.bindAddr(TPort(win.globalSettings.singleInstancePort.toU16), "localhost")
   win.oneInstSock.listen()
 {.push cdecl.}
 
@@ -2486,19 +2561,19 @@ proc checkAlreadyRunning(): bool =
   var client = asyncSocket()
   ioDispatcher.register(client)
   try:
-    client.connect("localhost", Port(win.globalSettings.singleInstancePort.toU16))
-  except OSError:
+    client.connect("localhost", TPort(win.globalSettings.singleInstancePort.toU16))
+  except EOS:
     return false
 
   var launch = true
   var waiting = true
   var waitingSince = epochTime()
 
-  proc onConnect(c: AsyncSocket) {.closure.} =
+  proc onConnect(c: PAsyncSocket) {.closure.} =
     echo("Checking for other instances of Aporia.")
     echo("Waiting for instance confirmation (for ", waitTime, " seconds)...")
 
-  proc onRead(c: AsyncSocket) {.closure, gcsafe.} =
+  proc onRead(c: PAsyncSocket) {.closure, gcsafe.} =
     var line = ""
     if c.readLine(line):
       if line == "":
